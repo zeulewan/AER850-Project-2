@@ -10,6 +10,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import tensorflow as tf
+from tensorflow.keras.regularizers import l2
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras import models, layers
 from tensorflow.keras.models import Sequential
@@ -53,17 +54,12 @@ TEST_DIR  = "Data/test"
 print("\nConfiguring augmentation...")
 train_datagen = ImageDataGenerator(
     rescale=1.0/255,
-    shear_range=0.25,
-    zoom_range=0.25,
-    horizontal_flip=True,
-    vertical_flip=True,
-    rotation_range=30,
-    width_shift_range=0.25,
-    height_shift_range=0.25,
-    brightness_range=[0.85, 1.15],
-    fill_mode="nearest",
+    shear_range=0.3,        # increase from 0.25
+    zoom_range=0.3,         # increase from 0.25
+    rotation_range=40,      # increase from 30
+    width_shift_range=0.3,  # increase from 0.25
+    height_shift_range=0.3, # increase from 0.25
 )
-
 val_datagen = ImageDataGenerator(rescale=1.0/255)
 
 print("✓ Augmentation ready (train augmented, validation rescaled only)")
@@ -147,10 +143,10 @@ model.add(MaxPooling2D((2, 2), name="pool5"))
 
 # Dense head
 model.add(Flatten(name="flatten"))
-model.add(Dense(256, activation="relu", name="dense1"))
-model.add(Dropout(0.5, name="dropout1"))
-model.add(Dense(128, activation="relu", name="dense2"))
-model.add(Dropout(0.5, name="dropout2"))
+model.add(Dense(256, activation="relu", kernel_regularizer=l2(0.001), name="dense1"))
+model.add(Dropout(0.6, name="dropout1"))
+model.add(Dense(128, activation="relu", kernel_regularizer=l2(0.001), name="dense2"))
+model.add(Dropout(0.6, name="dropout2"))
 model.add(Dense(N_CLASSES, activation="softmax", name="out"))
 
 bar("MODEL SUMMARY")
