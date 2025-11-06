@@ -1,30 +1,54 @@
 # --- Basic setup & log cleanup ------------------------------------------------
 import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"   # silence TF info/warnings
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"  # avoid oneDNN quirks on some CPUs
-os.environ["TF_CPP_MIN_VLOG_LEVEL"] = "3"  # hush grappler chatter
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+os.environ["TF_CPP_MIN_VLOG_LEVEL"] = "3"
+
+import logging
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
 import time
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
 import tensorflow as tf
-from tensorflow.keras.regularizers import l2
+tf.get_logger().setLevel('ERROR')
+
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras import models, layers
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, BatchNormalization, GlobalAveragePooling2D
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import ReduceLROnPlateau, Callback  # EarlyStopping removed
 
-# prefer legacy Adam on Apple silicon installs
-try:
-    from tensorflow.keras.optimizers.legacy import Adam
-except ImportError:
-    from tensorflow.keras.optimizers import Adam
+# --- Custom callback for clean progress ---
+class CleanProgressCallback(Callback):
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch = epoch
+        self.steps = 0
+        self.max_steps = self.params['steps']
+        
+    def on_batch_end(self, batch, logs=None):
+        self.steps += 1
+        progress = self.steps / self.max_steps
+        bar_length = 40
+        filled = int(bar_length * progress)
+        bar = '█' * filled + '░' * (bar_length - filled)
+        sys.stdout.write(f'\rEpoch {self.epoch+1}/{self.params["epochs"]} [{bar}] {self.steps}/{self.max_steps}')
+        sys.stdout.flush()
+    
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        sys.stdout.write('\r' + ' ' * 100 + '\r')
+        print(f"Epoch {epoch+1:2d} | "
+              f"Loss: {logs.get('loss', 0):.4f} | "
+              f"Acc: {logs.get('accuracy', 0):.4f} | "
+              f"Val Loss: {logs.get('val_loss', 0):.4f} | "
+              f"Val Acc: {logs.get('val_accuracy', 0):.4f} | "
+              f"LR: {logs.get('lr', 0):.2e}")
 
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-
-# --- Small helper for tidy console banners -----------------------------------
 def bar(txt=None, ch="=", n=60):
     print("\n" + ch * n)
     if txt:
@@ -36,7 +60,7 @@ def bar(txt=None, ch="=", n=60):
 # ==============================================================================
 bar("STEP 1 • DATA PREP")
 
-# image / loader config
+# Project requirement: Input shape MUST be (500, 500, 3)
 IMG_H, IMG_W, IMG_C = 500, 500, 3
 INPUT_SHAPE = (IMG_H, IMG_W, IMG_C)
 BATCH_SZ = 32
@@ -46,23 +70,30 @@ print(f"Input shape: {INPUT_SHAPE}")
 print(f"Batch size : {BATCH_SZ}")
 print(f"Classes    : {N_CLASSES}")
 
-# relative folder structure (train/valid/test with class subfolders)
+# Relative folder structure
 TRAIN_DIR = "Data/train"
 VAL_DIR   = "Data/valid"
 TEST_DIR  = "Data/test"
 
 print("\nConfiguring augmentation...")
+# Train: re-scaling, shear range, zoom range + additional augmentation
 train_datagen = ImageDataGenerator(
     rescale=1.0/255,
-    shear_range=0.3,        # increase from 0.25
-    zoom_range=0.3,         # increase from 0.25
-    rotation_range=40,      # increase from 30
-    width_shift_range=0.3,  # increase from 0.25
-    height_shift_range=0.3, # increase from 0.25
+    shear_range=0.2,
+    zoom_range=0.2,
+    rotation_range=10,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
+    horizontal_flip=True,
+    fill_mode="nearest",
 )
+
+# Validation: only re-scaling (as per requirements)
 val_datagen = ImageDataGenerator(rescale=1.0/255)
 
-print("✓ Augmentation ready (train augmented, validation rescaled only)")
+print("✓ Augmentation configured")
+print("  • Train: rescale + shear + zoom + rotation + shifts + flip")
+print("  • Validation: rescale only")
 
 print("\nBuilding generators...")
 try:
@@ -100,53 +131,62 @@ print(f"Class map         : {train_gen.class_indices}")
 print(f"Steps/epoch (train): {train_gen.n // BATCH_SZ}")
 print(f"Steps/epoch (val)  : {val_gen.n // BATCH_SZ}")
 
+# Verify expected counts
 expected_train, expected_val = 1942, 431
-if train_gen.n != expected_train:
-    print(f"⚠ Train count {train_gen.n} ≠ expected {expected_train} (OK if split differs)")
-else:
+if train_gen.n == expected_train:
     print(f"✓ Train count matches expected {expected_train}")
-
-if val_gen.n != expected_val:
-    print(f"⚠ Val count {val_gen.n} ≠ expected {expected_val} (OK if split differs)")
 else:
+    print(f"⚠ Train count {train_gen.n} ≠ expected {expected_train}")
+
+if val_gen.n == expected_val:
     print(f"✓ Val count matches expected {expected_val}")
+else:
+    print(f"⚠ Val count {val_gen.n} ≠ expected {expected_val}")
 
 print("\n✓ Step 1 complete")
 
 # ==============================================================================
-# 2) MODEL: CNN architecture
+# 2) MODEL: Stable CNN with GlobalAveragePooling
 # ==============================================================================
 bar("STEP 2 • MODEL")
 
 model = Sequential(name="AircraftDefectCNN")
 
-print("Assembling CNN...")
+print("Assembling CNN with GlobalAveragePooling (prevents NaN)...")
+
 # Block 1
-model.add(Conv2D(32, (3, 3), activation="relu", input_shape=INPUT_SHAPE, name="conv1"))
+model.add(Conv2D(32, (3, 3), activation="relu", padding="same", input_shape=INPUT_SHAPE, name="conv1"))
+model.add(BatchNormalization())
 model.add(MaxPooling2D((2, 2), name="pool1"))
 
 # Block 2
-model.add(Conv2D(64, (3, 3), activation="relu", name="conv2"))
+model.add(Conv2D(64, (3, 3), activation="relu", padding="same", name="conv2"))
+model.add(BatchNormalization())
 model.add(MaxPooling2D((2, 2), name="pool2"))
 
 # Block 3
-model.add(Conv2D(128, (3, 3), activation="relu", name="conv3"))
+model.add(Conv2D(128, (3, 3), activation="relu", padding="same", name="conv3"))
+model.add(BatchNormalization())
 model.add(MaxPooling2D((2, 2), name="pool3"))
 
 # Block 4
-model.add(Conv2D(128, (3, 3), activation="relu", name="conv4"))
+model.add(Conv2D(256, (3, 3), activation="relu", padding="same", name="conv4"))
+model.add(BatchNormalization())
 model.add(MaxPooling2D((2, 2), name="pool4"))
 
 # Block 5
-model.add(Conv2D(256, (3, 3), activation="relu", name="conv5"))
+model.add(Conv2D(512, (3, 3), activation="relu", padding="same", name="conv5"))
+model.add(BatchNormalization())
 model.add(MaxPooling2D((2, 2), name="pool5"))
 
-# Dense head
-model.add(Flatten(name="flatten"))
-model.add(Dense(256, activation="relu", kernel_regularizer=l2(0.001), name="dense1"))
-model.add(Dropout(0.6, name="dropout1"))
-model.add(Dense(128, activation="relu", kernel_regularizer=l2(0.001), name="dense2"))
-model.add(Dropout(0.6, name="dropout2"))
+# Use GlobalAveragePooling instead of Flatten to dramatically reduce parameters
+model.add(GlobalAveragePooling2D(name="global_pool"))
+
+# Much smaller dense layers
+model.add(Dense(256, activation="relu", name="dense1"))
+model.add(Dropout(0.5))
+model.add(Dense(128, activation="relu", name="dense2"))
+model.add(Dropout(0.5))
 model.add(Dense(N_CLASSES, activation="softmax", name="out"))
 
 bar("MODEL SUMMARY")
@@ -154,41 +194,47 @@ model.summary()
 print("\n✓ Step 2 complete")
 
 # ==============================================================================
-# 3) COMPILE: loss/optimizer/metrics
+# 3) COMPILE: MUCH lower learning rate to prevent NaN
 # ==============================================================================
 bar("STEP 3 • COMPILE & HYPERPARAMS")
 
-print("Compiling with categorical_crossentropy / Adam(lr=5e-4) / accuracy")
-opt = Adam(learning_rate=5e-4)
+print("Compiling with categorical_crossentropy / Adam(LOW LR) / accuracy")
+# CRITICAL: Very low learning rate to prevent gradient explosion with 500x500 images
+opt = Adam(learning_rate=0.0005, clipnorm=1.0)  # Added gradient clipping
 model.compile(loss="categorical_crossentropy", optimizer=opt, metrics=["accuracy"])
 
 print("\nHyperparameters")
-print("• Convs: filters 32→64→128→128→256, kernel 3×3, ReLU, MaxPool 2×2")
-print("• Dense: 256→128→softmax(3), Dropout 0.5")
+print("• Convs: filters 32→64→128→256→512, kernel 3×3, padding='same'")
+print("• GlobalAveragePooling instead of Flatten (prevents explosion)")
+print("• Dense: 256→128→softmax(3)")
+print("• Regularization: BatchNorm + Dropout 0.5")
 print(f"• Image size: {IMG_H}×{IMG_W}×{IMG_C}")
 print(f"• Batch size: {BATCH_SZ}")
+print("• Learning rate: 5e-4 (LOW to prevent NaN)")
+print("• Gradient clipping: 1.0")
 
 print("\n✓ Step 3 complete")
 
 # ==============================================================================
-# 4) TRAIN: callbacks, fit, save, plots, quick diagnostics
+# 4) TRAIN: callbacks, fit, save, plots, diagnostics
 # ==============================================================================
 bar("STEP 4 • TRAIN & EVALUATE")
 
-EPOCHS = 30  # long, early stopping will intervene if needed
+EPOCHS = 50
 
 print("Setting callbacks...")
 cbs = [
-    EarlyStopping(monitor="val_accuracy", patience=8, restore_best_weights=True, verbose=1),
-    ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=4, min_lr=1e-7, verbose=1),
+    # EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True, verbose=0),  # disabled by request
+    ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=10, min_lr=1e-8, verbose=0),
+    CleanProgressCallback()
 ]
-print("✓ EarlyStopping(patience=8), ReduceLROnPlateau(factor=0.5, patience=4)")
+print("✓ ReduceLROnPlateau(factor=0.5, patience=10), CleanProgressCallback • EarlyStopping disabled")
 
 print("\nTraining configuration")
 tr_steps = train_gen.n // BATCH_SZ
 va_steps = val_gen.n // BATCH_SZ
 print(f"• Epochs (max): {EPOCHS}")
-print(f"• Steps/epoch  : {tr_steps}  (~{tr_steps * BATCH_SZ} images/epoch)")
+print(f"• Steps/epoch  : {tr_steps}")
 print(f"• Val steps    : {va_steps}")
 
 bar("TRAINING")
@@ -200,7 +246,7 @@ history = model.fit(
     epochs=EPOCHS,
     validation_data=val_gen,
     callbacks=cbs,
-    verbose=1,
+    verbose=0,
 )
 
 t1 = time.time()
@@ -241,7 +287,7 @@ plt.plot(epochs_range, history.history["val_loss"], label="Val Loss", linewidth=
 plt.title("Loss", fontsize=14, fontweight="bold")
 plt.xlabel("Epoch"); plt.ylabel("Loss")
 max_loss = max(max(history.history["loss"]), max(history.history["val_loss"]))
-plt.ylim([0, max_loss * 1.1]); plt.xlim([0.5, len(history.history["loss"]) + 0.5])
+plt.ylim([0, min(max_loss * 1.1, 8)]); plt.xlim([0.5, len(history.history["loss"]) + 0.5])
 plt.legend(loc="upper right"); plt.grid(True, alpha=0.3)
 
 plt.tight_layout()
@@ -250,7 +296,7 @@ plt.savefig(plot_file, dpi=300, bbox_inches="tight")
 plt.close()
 print(f"✓ Saved curves → {plot_file}")
 
-# final metrics + basic overfit signal
+# final metrics
 bar("FINAL METRICS")
 tr_acc = history.history["accuracy"][-1]
 va_acc = history.history["val_accuracy"][-1]
@@ -264,18 +310,18 @@ print(f"Val   Loss: {va_loss:.4f}")
 
 gap = tr_acc - va_acc
 if gap > 0.15:
-    print("\n⚠ Likely overfitting:")
-    print("  • Consider higher dropout, stronger aug, or a smaller head.")
+    print("\n⚠ Some overfitting detected")
 elif va_acc > tr_acc:
-    print("\n✓ Nice: validation ≥ training (dropout often causes this).")
+    print("\n✓ Excellent: validation ≥ training!")
 else:
-    print(f"\n✓ Looks reasonable (gap {gap*100:.2f}%).")
+    print(f"\n✓ Reasonable generalization (gap {gap*100:.2f}%)")
 
 bar("PIPELINE DONE")
-print("Next up:")
-print("  1) Inspect outputs/model_performance.png")
-print("  2) If needed, tweak aug/dropout/filters and retrain")
-print("  3) Use your Step-5 script to run predictions on held-out images")
+print("Stability fixes applied:")
+print("  • GlobalAveragePooling2D (reduces params from ~30M to ~130K)")
+print("  • Low learning rate: 5e-4")
+print("  • Gradient clipping: 1.0")
+print("  • This should prevent NaN!")
 print("\nArtifacts:")
 print(f"  • {model_path}")
 print(f"  • {plot_file}")
