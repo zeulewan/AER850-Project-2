@@ -220,7 +220,7 @@ print("\n✓ Step 3 complete")
 # ==============================================================================
 bar("STEP 4 • TRAIN & EVALUATE")
 
-EPOCHS = 50
+EPOCHS = 15
 
 print("Setting callbacks...")
 cbs = [
@@ -262,7 +262,7 @@ print(f"Avg/epoch: {avg_per_epoch:.2f}s")
 
 # save model
 os.makedirs("models", exist_ok=True)
-model_path = "models/aircraft_defect_model.keras"
+model_path = "models/bad_aircraft_defect_model.keras"
 model.save(model_path)
 print(f"\n✓ Saved model → {model_path}")
 
@@ -276,7 +276,7 @@ plt.subplot(1, 2, 1)
 epochs_range = range(1, len(history.history["accuracy"]) + 1)
 plt.plot(epochs_range, history.history["accuracy"], label="Train Acc", linewidth=2, marker="o", markersize=8)
 plt.plot(epochs_range, history.history["val_accuracy"], label="Val Acc", linewidth=2, marker="s", markersize=8)
-plt.title("Accuracy", fontsize=14, fontweight="bold")
+plt.title("Bad Model Performance - Accuracy", fontsize=14, fontweight="bold")
 plt.xlabel("Epoch"); plt.ylabel("Accuracy"); plt.ylim([0, 1])
 plt.xlim([0.5, len(history.history["accuracy"]) + 0.5]); plt.legend(loc="lower right"); plt.grid(True, alpha=0.3)
 
@@ -284,14 +284,14 @@ plt.xlim([0.5, len(history.history["accuracy"]) + 0.5]); plt.legend(loc="lower r
 plt.subplot(1, 2, 2)
 plt.plot(epochs_range, history.history["loss"], label="Train Loss", linewidth=2, marker="o", markersize=8)
 plt.plot(epochs_range, history.history["val_loss"], label="Val Loss", linewidth=2, marker="s", markersize=8)
-plt.title("Loss", fontsize=14, fontweight="bold")
+plt.title("Bad Model Performance - Loss", fontsize=14, fontweight="bold")
 plt.xlabel("Epoch"); plt.ylabel("Loss")
 max_loss = max(max(history.history["loss"]), max(history.history["val_loss"]))
 plt.ylim([0, min(max_loss * 1.1, 8)]); plt.xlim([0.5, len(history.history["loss"]) + 0.5])
 plt.legend(loc="upper right"); plt.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plot_file = "outputs/model_performance.png"
+plot_file = "outputs/bad_model_performance.png"
 plt.savefig(plot_file, dpi=300, bbox_inches="tight")
 plt.close()
 print(f"✓ Saved curves → {plot_file}")
@@ -321,7 +321,6 @@ print("Stability fixes applied:")
 print("  • GlobalAveragePooling2D (reduces params from ~30M to ~130K)")
 print("  • Very low learning rate: 1e-5")
 print("  • Gradient clipping: 1.0")
-print("  • This should prevent NaN!")
 print("\nArtifacts:")
 print(f"  • {model_path}")
 print(f"  • {plot_file}")

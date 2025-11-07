@@ -6,7 +6,7 @@ from tensorflow.keras.utils import load_img, img_to_array
 
 # --- Config (match training) ---
 IMG_H, IMG_W = 500, 500
-MODEL_PATH   = "models/aircraft_defect_model.keras"
+MODEL_PATH   = "models/bad_aircraft_defect_model.keras"
 TRAIN_DIR    = "Data/train"   # fallback to rebuild class order if JSON missing
 TEST_DIR     = "Data/test"
 
@@ -53,6 +53,6 @@ for i, p in enumerate(paths, 1):
     plt.axis("off")
     plt.title(f"{os.path.basename(p)}\nPred: {label} ({conf:.2%})")
 plt.tight_layout()
-out_path = "outputs/test_predictions.png"
+out_path = "outputs/bad_test_predictions.png"
 plt.savefig(out_path, dpi=200, bbox_inches="tight")
 print(f"✓ Saved test panel → {out_path}")
